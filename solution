@@ -1,0 +1,319 @@
+/* =========================================================================
+   MONDAY COFFEE — EXPANSION ANALYSIS WITH SQL
+   Objective: Recommend the top 3 Indian cities for opening new coffee shops,
+   based on Q4 2023 sales data, estimated coffee consumers, and rent economics.
+   ========================================================================= */
+
+-- =========================================================================
+-- 0. SCHEMA (standard Monday Coffee dataset — adjust names if yours differ)
+-- =========================================================================
+
+CREATE TABLE city (
+    city_id         INT PRIMARY KEY,
+    city_name       VARCHAR(15),
+    population      BIGINT,
+    estimated_rent  FLOAT,
+    city_rank       INT
+);
+
+CREATE TABLE customers (
+    customer_id     INT PRIMARY KEY,
+    customer_name   VARCHAR(25),
+    city_id         INT,
+    CONSTRAINT fk_city FOREIGN KEY (city_id) REFERENCES city(city_id)
+);
+
+CREATE TABLE products (
+    product_id      INT PRIMARY KEY,
+    product_name    VARCHAR(35),
+    price           FLOAT
+);
+
+CREATE TABLE sales (
+    sale_id         INT PRIMARY KEY,
+    sale_date       DATE,
+    product_id      INT,
+    customer_id     INT,
+    total           FLOAT,
+    rating          INT,
+    CONSTRAINT fk_products  FOREIGN KEY (product_id)  REFERENCES products(product_id),
+    CONSTRAINT fk_customers FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+);
+
+
+/* =========================================================================
+   EASY–MEDIUM QUESTIONS
+   ========================================================================= */
+
+-- Q1. Coffee Consumers Count
+-- How many people in each city are estimated to consume coffee (25% of population)?
+SELECT
+    city_name,
+    ROUND((population * 0.25) / 1000000, 2) AS coffee_consumers_in_millions,
+    city_rank
+FROM city
+ORDER BY coffee_consumers_in_millions DESC;
+
+
+-- Q2. Total Revenue from Coffee Sales — last quarter of 2023 (Oct–Dec)
+SELECT
+    ci.city_name,
+    SUM(s.total) AS total_revenue
+FROM sales s
+JOIN customers c ON s.customer_id = c.customer_id
+JOIN city ci      ON c.city_id    = ci.city_id
+WHERE EXTRACT(YEAR FROM s.sale_date) = 2023
+  AND EXTRACT(QUARTER FROM s.sale_date) = 4
+GROUP BY ci.city_name
+ORDER BY total_revenue DESC;
+
+
+-- Q3. Sales Count for Each Product
+SELECT
+    p.product_name,
+    COUNT(s.sale_id) AS total_orders
+FROM products p
+LEFT JOIN sales s ON p.product_id = s.product_id
+GROUP BY p.product_name
+ORDER BY total_orders DESC;
+
+
+-- Q4. Average Sales Amount per City (avg spend per customer)
+SELECT
+    ci.city_name,
+    SUM(s.total)                                           AS total_revenue,
+    COUNT(DISTINCT s.customer_id)                          AS total_customers,
+    ROUND(SUM(s.total) / COUNT(DISTINCT s.customer_id), 2) AS avg_sale_per_customer
+FROM sales s
+JOIN customers c ON s.customer_id = c.customer_id
+JOIN city ci      ON c.city_id    = ci.city_id
+GROUP BY ci.city_name
+ORDER BY total_revenue DESC;
+
+
+-- Q5. City Population and Coffee Consumers (with actual unique customers we already have)
+SELECT
+    ci.city_name,
+    ci.population,
+    ROUND((ci.population * 0.25) / 1000000, 2) AS estimated_coffee_consumers_millions,
+    COUNT(DISTINCT c.customer_id)               AS unique_customers
+FROM city ci
+LEFT JOIN customers c ON ci.city_id = c.city_id
+GROUP BY ci.city_name, ci.population
+ORDER BY estimated_coffee_consumers_millions DESC;
+
+
+/* =========================================================================
+   MEDIUM QUESTIONS
+   ========================================================================= */
+
+-- Q6. Top Selling Products by City (top 3 per city, by sales volume)
+SELECT city_name, product_name, total_orders, rank_in_city
+FROM (
+    SELECT
+        ci.city_name,
+        p.product_name,
+        COUNT(s.sale_id) AS total_orders,
+        DENSE_RANK() OVER (PARTITION BY ci.city_name ORDER BY COUNT(s.sale_id) DESC) AS rank_in_city
+    FROM sales s
+    JOIN products p  ON s.product_id  = p.product_id
+    JOIN customers c ON s.customer_id = c.customer_id
+    JOIN city ci     ON c.city_id     = ci.city_id
+    GROUP BY ci.city_name, p.product_name
+) ranked
+WHERE rank_in_city <= 3
+ORDER BY city_name, rank_in_city;
+
+
+-- Q7. Customer Segmentation by City — unique customers who purchased coffee products
+SELECT
+    ci.city_name,
+    COUNT(DISTINCT c.customer_id) AS unique_coffee_customers
+FROM sales s
+JOIN customers c ON s.customer_id = c.customer_id
+JOIN city ci      ON c.city_id    = ci.city_id
+GROUP BY ci.city_name
+ORDER BY unique_coffee_customers DESC;
+
+
+-- Q8. Impact of Estimated Rent on Sales — avg sale/customer vs avg rent/customer, by city
+SELECT
+    ci.city_name,
+    ci.estimated_rent,
+    COUNT(DISTINCT c.customer_id)                                 AS total_customers,
+    ROUND(SUM(s.total) / COUNT(DISTINCT c.customer_id), 2)        AS avg_sale_per_customer,
+    ROUND(ci.estimated_rent / COUNT(DISTINCT c.customer_id), 2)   AS avg_rent_per_customer
+FROM sales s
+JOIN customers c ON s.customer_id = c.customer_id
+JOIN city ci      ON c.city_id    = ci.city_id
+GROUP BY ci.city_name, ci.estimated_rent
+ORDER BY avg_rent_per_customer ASC;
+
+
+/* =========================================================================
+   ADVANCED QUESTIONS (from the slides)
+   ========================================================================= */
+
+-- Q9. Monthly Sales Growth — % growth/decline in sales month-over-month, by city
+WITH monthly_sales AS (
+    SELECT
+        ci.city_name,
+        EXTRACT(YEAR FROM s.sale_date)  AS sale_year,
+        EXTRACT(MONTH FROM s.sale_date) AS sale_month,
+        SUM(s.total) AS total_sale
+    FROM sales s
+    JOIN customers c ON s.customer_id = c.customer_id
+    JOIN city ci      ON c.city_id    = ci.city_id
+    GROUP BY ci.city_name, sale_year, sale_month
+),
+growth AS (
+    SELECT
+        city_name,
+        sale_year,
+        sale_month,
+        total_sale AS current_month_sale,
+        LAG(total_sale) OVER (PARTITION BY city_name ORDER BY sale_year, sale_month) AS prev_month_sale
+    FROM monthly_sales
+)
+SELECT
+    city_name,
+    sale_year,
+    sale_month,
+    current_month_sale,
+    prev_month_sale,
+    ROUND((current_month_sale - prev_month_sale) / prev_month_sale * 100, 2) AS growth_pct
+FROM growth
+WHERE prev_month_sale IS NOT NULL
+ORDER BY city_name, sale_year, sale_month;
+
+
+-- Q10. Market Potential Analysis — top 3 cities by total sales, with full profile
+SELECT
+    ci.city_name,
+    SUM(s.total)                                                  AS total_sale,
+    ci.estimated_rent                                             AS total_rent,
+    COUNT(DISTINCT s.customer_id)                                 AS total_customers,
+    ROUND((ci.population * 0.25) / 1000000, 2)                    AS estimated_coffee_consumers_millions,
+    ROUND(SUM(s.total) / COUNT(DISTINCT s.customer_id), 2)        AS avg_sale_per_customer,
+    ROUND(ci.estimated_rent / COUNT(DISTINCT s.customer_id), 2)   AS avg_rent_per_customer
+FROM sales s
+JOIN customers c ON s.customer_id = c.customer_id
+JOIN city ci      ON c.city_id    = ci.city_id
+GROUP BY ci.city_name, ci.estimated_rent, ci.population
+ORDER BY total_sale DESC
+LIMIT 3;
+
+
+/* =========================================================================
+   EXTRA ADVANCED — beyond the brief, for a stronger portfolio story
+   ========================================================================= */
+
+-- Q11. Customer Repeat-Purchase Rate by City
+-- (retention signal — a city with high repeat rate suggests loyal, sticky demand)
+WITH order_counts AS (
+    SELECT
+        ci.city_name,
+        s.customer_id,
+        COUNT(s.sale_id) AS orders_per_customer
+    FROM sales s
+    JOIN customers c ON s.customer_id = c.customer_id
+    JOIN city ci      ON c.city_id    = ci.city_id
+    GROUP BY ci.city_name, s.customer_id
+)
+SELECT
+    city_name,
+    COUNT(customer_id)                                              AS total_customers,
+    SUM(CASE WHEN orders_per_customer > 1 THEN 1 ELSE 0 END)        AS repeat_customers,
+    ROUND(
+        100.0 * SUM(CASE WHEN orders_per_customer > 1 THEN 1 ELSE 0 END)
+        / COUNT(customer_id), 2
+    ) AS repeat_customer_pct
+FROM order_counts
+GROUP BY city_name
+ORDER BY repeat_customer_pct DESC;
+
+
+-- Q12. Product Quality Signal — average customer rating by city
+-- (flags cities where the product experience is landing well, not just volume)
+SELECT
+    ci.city_name,
+    ROUND(AVG(s.rating), 2) AS avg_rating,
+    COUNT(s.sale_id)        AS total_orders
+FROM sales s
+JOIN customers c ON s.customer_id = c.customer_id
+JOIN city ci      ON c.city_id    = ci.city_id
+GROUP BY ci.city_name
+ORDER BY avg_rating DESC;
+
+
+-- Q13. Best-Selling Product by Revenue (not just order count) — overall
+SELECT
+    p.product_name,
+    COUNT(s.sale_id)      AS total_orders,
+    SUM(s.total)           AS total_revenue,
+    ROUND(SUM(s.total) / COUNT(s.sale_id), 2) AS avg_order_value
+FROM products p
+JOIN sales s ON p.product_id = s.product_id
+GROUP BY p.product_name
+ORDER BY total_revenue DESC;
+
+
+-- Q14. Cumulative (running total) Revenue by Month — company-wide trend
+WITH monthly_totals AS (
+    SELECT
+        DATE_TRUNC('month', sale_date) AS sale_month,
+        SUM(total) AS monthly_revenue
+    FROM sales
+    GROUP BY DATE_TRUNC('month', sale_date)
+)
+SELECT
+    sale_month,
+    monthly_revenue,
+    SUM(monthly_revenue) OVER (ORDER BY sale_month) AS running_total_revenue
+FROM monthly_totals
+ORDER BY sale_month;
+
+
+-- Q15. Weighted Expansion Score — combine consumer size, revenue, and rent efficiency
+-- into a single rankable score to make the final city recommendation less subjective.
+-- Weights: 40% consumer base, 40% total revenue, 20% rent efficiency (inverse of avg rent/customer)
+WITH city_metrics AS (
+    SELECT
+        ci.city_name,
+        ROUND((ci.population * 0.25) / 1000000, 2)              AS consumers_millions,
+        SUM(s.total)                                             AS total_revenue,
+        COUNT(DISTINCT s.customer_id)                            AS total_customers,
+        ROUND(ci.estimated_rent / COUNT(DISTINCT s.customer_id), 2) AS avg_rent_per_customer
+    FROM sales s
+    JOIN customers c ON s.customer_id = c.customer_id
+    JOIN city ci      ON c.city_id    = ci.city_id
+    GROUP BY ci.city_name, ci.estimated_rent, ci.population
+),
+normalized AS (
+    SELECT
+        city_name,
+        consumers_millions / (SELECT MAX(consumers_millions) FROM city_metrics) AS consumer_score,
+        total_revenue      / (SELECT MAX(total_revenue)      FROM city_metrics) AS revenue_score,
+        1 - (avg_rent_per_customer / (SELECT MAX(avg_rent_per_customer) FROM city_metrics)) AS rent_efficiency_score
+    FROM city_metrics
+)
+SELECT
+    city_name,
+    ROUND(
+        (0.4 * consumer_score) + (0.4 * revenue_score) + (0.2 * rent_efficiency_score),
+        3
+    ) AS expansion_score
+FROM normalized
+ORDER BY expansion_score DESC
+LIMIT 3;
+
+
+/* =========================================================================
+   NOTES
+   - EXTRACT(QUARTER FROM ...) and DATE_TRUNC are PostgreSQL syntax.
+     MySQL equivalents: QUARTER(sale_date), and for DATE_TRUNC use
+     DATE_FORMAT(sale_date, '%Y-%m-01').
+   - Table/column names assume the standard "Monday Coffee" dataset
+     (city, customers, products, sales). Rename to match your actual
+     CSVs/schema if they differ.
+   ========================================================================= */
